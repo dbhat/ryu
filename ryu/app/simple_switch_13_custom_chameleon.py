@@ -21,6 +21,8 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
+from ryu.lib.packet import vlan
+from ryu.app import ofctl_rest
 
 
 HARD_TIMEOUT = 600
@@ -39,8 +41,7 @@ class SimpleSwitch13(app_manager.RyuApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
-        # install table-miss flow entry
+	# install table-miss flow entry
         #
         # We specify NO BUFFER to max_len of the output action due to
         # OVS bug. At this moment, if we specify a lesser number, e.g.,
@@ -52,7 +53,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
 
         self.add_flow(datapath, 0, match, actions)
-
+    	
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
 
         ofproto = datapath.ofproto
@@ -125,11 +126,15 @@ class SimpleSwitch13(app_manager.RyuApp):
             return
         dst = eth.dst
         src = eth.src
+        vl = pkt.get_protocols(vlan.vlan)
 
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+	if len(vl)>0:
+		self.logger.info("packet in %s %s %s %s DL_TYPE %s \nVLAN info %s ", dpid, src, dst, in_port, msg.match, vl)
+	#else:
+	#	self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -140,30 +145,37 @@ class SimpleSwitch13(app_manager.RyuApp):
             out_port = ofproto.OFPP_ALL
 
         actions = [parser.OFPActionOutput(out_port)]
-
+	'''
+	Note: Add OFPVID_PRESENT to the vlan id match field using 0x1000 or 4096 since RYU does not auto enable this for OpenFlow > 1.2 
+	'''
+	if len(vl)>0:
+		for p in pkt:
+			if p.protocol_name=="vlan":
+				vlan_i=(p.vid+4096)
+	else:
+		vlan_i=0
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_ALL:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            # verify if we have a valid buffer_id, if yes avoid to send both
+	    priority = 1
+	    match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src, vlan_vid=vlan_i)
+	    # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
+	    
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                priority = 1
-                self.add_flow(datapath, priority, match, actions, msg.buffer_id)
-                return
+                	self.add_flow(datapath, priority, match, actions, msg.buffer_id)
+			return
             else:
-                priority = 1
                 self.add_flow(datapath, priority, match, actions)
-        data = None
+	data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
 
         out = parser.OFPPacketOut(datapath=datapath, 
                                   buffer_id=msg.buffer_id,
-                                  in_port=in_port, 
-                                  actions=actions, 
+				  in_port=in_port, 
+				  actions=actions, 
                                   data=data)
         datapath.send_msg(out)
-
     @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
     def _port_status_handler(self, ev):
         msg = ev.msg
